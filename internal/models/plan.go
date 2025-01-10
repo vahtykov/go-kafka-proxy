@@ -1,14 +1,16 @@
 package models
 
-import (
-	"gorm.io/gorm"
-)
+import "time"
 
 type Plan struct {
-    gorm.Model `gorm:"table:track_plans"`
-    Name        string `varchar:"name"`
-    Description string `text:"description"`
-    Data        string `jsonb:"data"`
-    CreatedAt   string `timestamptz:"createdAt"`
-    UpdatedAt   string `timestamptz:"updatedAt"`
+    ID          int `gorm:"primarykey;column:id;not null;<-:false"`
+    Name        string `gorm:"varchar(255);column:name"`
+    Description string `gorm:"text;column:description"`
+    Data        string `gorm:"jsonb;column:data"`
+    CreatedAt   time.Time `gorm:"timestamptz;column:createdAt;<-:false"`
+	UpdatedAt   time.Time `gorm:"timestamptz;column:updatedAt;<-:false"`
+}
+
+func (Plan) TableName() string {
+	return "public.track_plans"
 }

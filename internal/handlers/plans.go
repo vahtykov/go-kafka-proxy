@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"go-rest-api-kafka/internal/models"
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -26,6 +27,8 @@ func (h *PlansHandler) GetAllPlans(c *gin.Context) {
         })
         return
     }
+
+    log.Println(plans)
 
     c.JSON(http.StatusOK, plans)
 }
