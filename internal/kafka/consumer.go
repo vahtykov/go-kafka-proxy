@@ -87,7 +87,7 @@ func NewConsumer(brokers string, topic string, groupID string, db *gorm.DB, serv
 	// Настройки группы
 	config.Consumer.Group.Rebalance.Strategy = sarama.BalanceStrategyRoundRobin
 	
-	// Устанавливаем стратегию чтения на основе значения из БД
+	// Устанавливаем стратегию чтения на основе значения из БД.
 	switch strategy {
 	case "READ_FROM_BEGINNING":
 		config.Consumer.Offsets.Initial = sarama.OffsetOldest
