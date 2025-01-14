@@ -22,13 +22,13 @@ func main() {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 
-	// Создание Kafka консьюмера
+	// Создание Kafka консьюмер
 	consumer, err := kafka.NewConsumer(
 		cfg.KafkaBrokers,
 		cfg.KafkaTopic,
 		cfg.KafkaGroupID,
 		db,
-		cfg.ServiceConsumerURL,
+		cfg.ServiceLoaderURL,
 	)
 	if err != nil {
 		log.Fatalf("Failed to create Kafka consumer: %v", err)

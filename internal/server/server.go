@@ -14,11 +14,8 @@ type Server struct {
 
 func NewServer(db *gorm.DB) *Server {
 	router := gin.Default()
-	
-	plansHandler := handlers.NewPlansHandler(db)
-	
+
 	router.GET("/health", handlers.HealthCheck)
-	router.GET("/plans", plansHandler.GetAllPlans)
 
 	return &Server{
 		router: router,

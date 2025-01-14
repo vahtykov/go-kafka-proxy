@@ -15,7 +15,7 @@ type Config struct {
     KafkaBrokers string
     KafkaTopic   string
     Port         string
-    ServiceConsumerURL   string
+    ServiceLoaderURL   string
     KafkaGroupID string
 }
 
@@ -33,7 +33,7 @@ func LoadConfig() (*Config, error) {
         KafkaBrokers: os.Getenv("KAFKA_BROKERS"),
         KafkaTopic:   os.Getenv("KAFKA_TOPIC"),
         Port:         os.Getenv("PORT"),
-        ServiceConsumerURL:   os.Getenv("SERVICE_CONSUMER_URL"),
+        ServiceLoaderURL:   os.Getenv("SERVICE_LOADER_URL"),
         KafkaGroupID: os.Getenv("KAFKA_GROUP_ID"),
     }, nil
 }
