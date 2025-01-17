@@ -1,7 +1,10 @@
 package server
 
 import (
+	"context"
 	"go-rest-api-kafka/internal/handlers"
+
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -10,6 +13,7 @@ import (
 type Server struct {
 	router *gin.Engine
 	db     *gorm.DB
+	httpServer *http.Server
 }
 
 func NewServer(db *gorm.DB) *Server {
@@ -24,5 +28,14 @@ func NewServer(db *gorm.DB) *Server {
 }
 
 func (s *Server) Start(addr string) error {
-	return s.router.Run(addr)
+	s.httpServer = &http.Server{
+		Addr:    addr,
+		Handler: s.router,
+	}
+	
+	return s.httpServer.ListenAndServe()
+}
+
+func (s *Server) Shutdown(ctx context.Context) error {
+	return s.httpServer.Shutdown(ctx)
 }

@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"go-rest-api-kafka/internal/config"
 	"go-rest-api-kafka/internal/database"
-
-	// "go-rest-api-kafka/internal/kafka"
-	kafka_test "go-rest-api-kafka/internal/kafka-test"
+	"go-rest-api-kafka/internal/kafka"
 	"go-rest-api-kafka/internal/server"
 	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 )
 
 func main() {
@@ -25,25 +29,50 @@ func main() {
 	}
 
 	// Создание Kafka консьюмер
-	kafka_test.NewConsumerTest(
+	consumer, err := kafka.NewConsumer(
 		cfg.KafkaBrokers,
 		cfg.KafkaTopic,
 		cfg.KafkaGroupID,
 		db,
 		cfg.ServiceLoaderURL,
 	)
-	// if err != nil {
-	// 	log.Fatalf("Failed to create Kafka consumer: %v", err)
-	// }
+	if err != nil {
+		log.Fatalf("Failed to create Kafka consumer: %v", err)
+	}
 
-	// Запуск консьюмера
-	// if err := consumer.Start(); err != nil {
-	// 	log.Fatalf("Failed to start Kafka consumer: %v", err)
-	// }
+	// Запускаем консьюмер
+	if err := consumer.Start(); err != nil {
+		log.Fatalf("Failed to start Kafka consumer: %v", err)
+	}
 
-	// Создание и запуск HTTP сервера
+	// Создание HTTP сервера
 	srv := server.NewServer(db)
-	if err := srv.Start(fmt.Sprintf(":%s", cfg.Port)); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
+
+	// Graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Запускаем сервер в отдельной горутине
+	go func() {
+		if err := srv.Start(fmt.Sprintf(":%s", cfg.Port)); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Failed to start server: %v", err)
+		}
+	}()
+
+	// Ожидаем сигнал остановки
+	<-sigChan
+
+	// Создаем контекст с таймаутом для graceful shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Сначала останавливаем консьюмер
+	if err := consumer.Close(); err != nil {
+		log.Printf("Error closing consumer: %v", err)
+	}
+
+	// Затем останавливаем HTTP сервер
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("Error shutting down server: %v", err)
 	}
 }

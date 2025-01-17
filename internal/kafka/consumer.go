@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go-rest-api-kafka/internal/models"
 	"io"
@@ -199,9 +200,9 @@ func NewConsumer(brokers string, topic string, groupID string, db *gorm.DB, serv
 	}
 	
 	config.Consumer.Offsets.AutoCommit.Enable = false
-	config.Consumer.MaxProcessingTime = 300 * time.Second
-	config.Consumer.Group.Session.Timeout = 60 * time.Second
-	config.Consumer.MaxWaitTime = 5 * time.Second // Вынести все эти значения в настройки
+	config.Consumer.MaxProcessingTime = 5 * time.Second
+	config.Consumer.Group.Session.Timeout = 20 * time.Second
+	config.Consumer.MaxWaitTime = 5 * time.Second
 	config.Consumer.Fetch.Max = 100 // max.poll.records - Читаем по 100 сообщений за раз
 
 	group, err := sarama.NewConsumerGroup(strings.Split(brokers, ","), groupID, config)
@@ -215,7 +216,7 @@ func NewConsumer(brokers string, topic string, groupID string, db *gorm.DB, serv
 		topic:        topic,
 		serviceURL:   serviceURL,
 		httpClient:   &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout: 5 * time.Second,
 		},
 		ready:        make(chan bool),
 		groupID:      groupID,
@@ -233,13 +234,17 @@ func (c *Consumer) Setup(_ sarama.ConsumerGroupSession) error {
 	return nil
 }
 
+func (c *Consumer) Close() error {
+    return c.consumerGroup.Close()
+}
+
 // Вызывается при остановке потребителя
 func (c *Consumer) Cleanup(_ sarama.ConsumerGroupSession) error {
 	c.ready = make(chan bool) // Готовим новый канал для обработки следующего сообщения
 	return nil
 }
 
-func (c *Consumer) sendToLoader(messageData []byte) error {
+func (c *Consumer) sendToLoader(ctx context.Context, messageData []byte) error {
 	// Декодируем JSON только для получения полей suitCode и eventType
 	var message map[string]interface{}
 	if err := json.Unmarshal(messageData, &message); err != nil {
@@ -276,7 +281,7 @@ func (c *Consumer) sendToLoader(messageData []byte) error {
 	url := fmt.Sprintf("%s%s", c.serviceURL, path)
 
 	// Создаем запрос, используя исходные данные без преобразования
-	req, err := http.NewRequest(method, url, bytes.NewBuffer(messageData))
+	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewBuffer(messageData))
 	if err != nil {
 		return fmt.Errorf("ошибка создания запроса: %v", err)
 	}
@@ -300,68 +305,75 @@ func (c *Consumer) sendToLoader(messageData []byte) error {
 
 // Вызывается для обработки сообщений
 func (c *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
-	for msg := range claim.Messages() {
-		// TODO: добавить сохранение сырых данных в базу track_loads_log
+	fmt.Printf("Starting to consume messages from partition %d\n", claim.Partition())
 
-		processed, err := c.isMessageProcessed(msg)
-		if err != nil {
-			fmt.Printf("Ошибка проверки обработки сообщения: %v\n", err)
-			continue
-		}
+	// Используем select для обработки сообщений и контекста
+	for {
+		select {
+		case msg, ok := <-claim.Messages():
+			fmt.Printf("Received message from partition %d\n", msg.Partition)
 
-		if processed {
-			fmt.Printf("Сообщение уже обработано: %d/%d\n", msg.Partition, msg.Offset)
+			if !ok {
+				return nil // канал закрыт
+			}
+			
+			processed, err := c.isMessageProcessed(msg)
+			if err != nil {
+				fmt.Printf("Ошибка проверки обработки сообщения: %v\n", err)
+				continue
+			}
+
+			if processed {
+				fmt.Printf("Сообщение уже обработано: %d/%d\n", msg.Partition, msg.Offset)
+				session.MarkMessage(msg, "")
+				continue
+			}
+			
+			// Отправляем сырые данные в loader
+			if err := c.sendToLoader(session.Context(), msg.Value); err != nil {
+				fmt.Printf("Ошибка отправки в loader: %v\n", err)
+				continue
+			}
+
+			// Сохраняем информацию об обработке в транзакции
+			if err := c.markMessageProcessed(msg); err != nil {
+				fmt.Printf("Ошибка сохранения состояния: %v\n", err)
+				continue
+			}
+
+			fmt.Printf("Сообщение успешно обработано: %d/%d\n", msg.Partition, msg.Offset)
 			session.MarkMessage(msg, "")
-			continue
-		}
-		
-		// Отправляем сырые данные в loader
-		if err := c.sendToLoader(msg.Value); err != nil {
-			fmt.Printf("Ошибка отправки в loader: %v\n", err)
-			continue
-		}
+			session.Commit()
 
-		// Сохраняем информацию об обработке в транзакции
-		if err := c.markMessageProcessed(msg); err != nil {
-			fmt.Printf("Ошибка сохранения состояния: %v\n", err)
-			continue
+		case <-session.Context().Done():
+			return nil // Контекст отменен (например, при ребалансировке)
 		}
-
-		fmt.Printf("Сообщение успешно обработано: %d/%d\n", msg.Partition, msg.Offset)
-		session.MarkMessage(msg, "")
-
-		// Явно коммитим офсеты в Kafka
-		session.Commit()
 	}
-
-	return nil
 }
 
 func (c *Consumer) Start() error {
+	// Создаем контекст без defer cancel(), так как нам нужно, 
+	// чтобы контекст жил все время работы консьюмера
 	ctx := context.Background()
 	topics := []string{c.topic}
 
 	go func() {
 		for {
-			// Читаем сообщения пока контекст активен
 			if err := c.consumerGroup.Consume(ctx, topics, c); err != nil {
+				if errors.Is(err, sarama.ErrClosedConsumerGroup) {
+					return
+				}
 				fmt.Printf("Error from consumer: %v\n", err)
 			}
-			// Проверяем, был ли контекст отменен
+			
 			if ctx.Err() != nil {
-				return // Контекст отменен, завершаем горутину
+				return
 			}
-
-			// Если произошла перебалансировка:
-      // - Старый канал уже закрыт
-      // - Нужен новый канал для следующего цикла
 			c.ready = make(chan bool)
 		}
 	}()
 
-	// Ждём, пока консьюмер будет готов
-	<-c.ready // Блокируемся здесь, пока канал не закроется
-	fmt.Println("Consumer is ready")
-
+	<-c.ready
+	fmt.Println("Kafka Consumer started")
 	return nil
 }
