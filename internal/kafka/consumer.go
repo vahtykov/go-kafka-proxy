@@ -5,13 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go-rest-api-kafka/internal/models"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/IBM/sarama"
-	"github.com/your-project/database"
 	"gorm.io/gorm"
 )
 
@@ -19,9 +20,12 @@ type Consumer struct {
 	consumerGroup sarama.ConsumerGroup
 	db           *gorm.DB
 	topic        string
+	groupID      string
 	serviceURL   string
 	httpClient   *http.Client
 	ready        chan bool
+	processedMessages map[string]struct{} // key = "topic:partition:offset"
+  cacheMutex       sync.RWMutex
 }
 
 type Setting struct {
@@ -61,9 +65,105 @@ type Setting struct {
 		9. ConsumeClaim() ─┘
 */
 
+//---Работа с in-memory кэшем---
+func (c *Consumer) loadProcessedMessagesCache() error {
+    c.cacheMutex.Lock()
+    defer c.cacheMutex.Unlock()
+
+    var messages []models.ProcessedMessage
+		// TODO: Добавить фильтр, чтобы выгружать только часть сообщений
+    if err := c.db.Where("topic = ?", c.topic).Find(&messages).Error; err != nil {
+        return err
+    }
+
+    c.processedMessages = make(map[string]struct{})
+    for _, msg := range messages {
+        key := fmt.Sprintf("%s:%d:%d", msg.Topic, msg.Partition, msg.Offset)
+        c.processedMessages[key] = struct{}{}
+    }
+    return nil
+}
+
+func (c *Consumer) isMessageProcessedFromCache(msg *sarama.ConsumerMessage) bool {
+    c.cacheMutex.RLock()
+    defer c.cacheMutex.RUnlock()
+    
+    key := fmt.Sprintf("%s:%d:%d", msg.Topic, msg.Partition, msg.Offset)
+    _, exists := c.processedMessages[key]
+    return exists
+}
+
+func (c *Consumer) addToProcessedCache(msg *sarama.ConsumerMessage) {
+    c.cacheMutex.Lock()
+    defer c.cacheMutex.Unlock()
+    
+    key := fmt.Sprintf("%s:%d:%d", msg.Topic, msg.Partition, msg.Offset)
+    c.processedMessages[key] = struct{}{}
+}
+
+//---END Работа с in-memory кэшем---
+
+func (c *Consumer) saveOffset(topic string, partition int32, offset int64) error {
+    return c.db.Transaction(func(tx *gorm.DB) error {
+        var kafkaOffset models.KafkaOffset
+
+        result := tx.Where(
+					"topic = ? AND partition = ? AND group_id = ?",
+					topic, partition, c.groupID,
+				).First(&kafkaOffset)
+
+        if result.Error != nil {
+            if result.Error == gorm.ErrRecordNotFound {
+                kafkaOffset = models.KafkaOffset{
+                    Topic:     topic,
+                    Partition: partition,
+                    GroupID:   c.groupID,
+                }
+            } else {
+                return result.Error
+            }
+        }
+
+        kafkaOffset.Offset = offset
+        kafkaOffset.UpdatedAt = time.Now()
+
+        return tx.Save(&kafkaOffset).Error
+    })
+}
+
+func (c *Consumer) isMessageProcessed(msg *sarama.ConsumerMessage) (bool, error) {
+    var count int64
+    err := c.db.Model(&models.ProcessedMessage{}).Where(
+        "topic = ? AND partition = ? AND \"offset\" = ?",
+        msg.Topic, msg.Partition, msg.Offset,
+    ).Count(&count).Error
+    return count > 0, err
+}
+
+func (c *Consumer) markMessageProcessed(msg *sarama.ConsumerMessage) error {
+    return c.db.Transaction(func(tx *gorm.DB) error {
+        // Сохраняем информацию о сообщении
+        processedMsg := models.ProcessedMessage{
+            MessageID:   string(msg.Key),
+            Topic:      msg.Topic,
+            Partition:  msg.Partition,
+            Offset:     msg.Offset,
+            ProcessedAt: time.Now(),
+        }
+        if err := tx.Create(&processedMsg).Error; err != nil {
+            return err
+        }
+
+        // Обновляем офсет
+        return c.saveOffset(msg.Topic, msg.Partition, msg.Offset)
+    })
+}
+
 func GetKafkaConsumerStrategy(db *gorm.DB) (string, error) {
     var setting Setting
-    result := db.Where("service = ? AND name = ?", "kafka_proxy", "kafka_consumer_strategy").First(&setting)
+    result := db.Where(
+			"service = ? AND name = ?", "kafka_proxy", "kafka_consumer_strategy",
+		).First(&setting)
     
     if result.Error != nil {
         if result.Error == gorm.ErrRecordNotFound {
@@ -79,7 +179,7 @@ func NewConsumer(brokers string, topic string, groupID string, db *gorm.DB, serv
 	config := sarama.NewConfig()
 	
 	// Получаем стратегию из базы данных
-	strategy, err := database.GetKafkaConsumerStrategy(db)
+	strategy, err := GetKafkaConsumerStrategy(db)
 	if err != nil {
 		return nil, fmt.Errorf("error getting kafka consumer strategy: %v", err)
 	}
@@ -87,11 +187,12 @@ func NewConsumer(brokers string, topic string, groupID string, db *gorm.DB, serv
 	// Настройки группы
 	config.Consumer.Group.Rebalance.Strategy = sarama.BalanceStrategyRoundRobin
 	
-	// Устанавливаем стратегию чтения на основе значения из БД.
+	// Устанавливаем стратегию чтения на основе значения из БД
 	switch strategy {
 	case "READ_FROM_BEGINNING":
 		config.Consumer.Offsets.Initial = sarama.OffsetOldest
 	case "READ_NEWEST_RECORDS":
+		fmt.Println("Kafka consumer strategy: READ_NEWEST_RECORDS")
 		config.Consumer.Offsets.Initial = sarama.OffsetNewest
 	default:
 		return nil, fmt.Errorf("unknown kafka consumer strategy: %s", strategy)
@@ -100,7 +201,7 @@ func NewConsumer(brokers string, topic string, groupID string, db *gorm.DB, serv
 	config.Consumer.Offsets.AutoCommit.Enable = false
 	config.Consumer.MaxProcessingTime = 300 * time.Second
 	config.Consumer.Group.Session.Timeout = 60 * time.Second
-	config.Consumer.MaxWaitTime = 500 * time.Millisecond
+	config.Consumer.MaxWaitTime = 5 * time.Second // Вынести все эти значения в настройки
 	config.Consumer.Fetch.Max = 100 // max.poll.records - Читаем по 100 сообщений за раз
 
 	group, err := sarama.NewConsumerGroup(strings.Split(brokers, ","), groupID, config)
@@ -117,11 +218,17 @@ func NewConsumer(brokers string, topic string, groupID string, db *gorm.DB, serv
 			Timeout: 10 * time.Second,
 		},
 		ready:        make(chan bool),
+		groupID:      groupID,
 	}, nil
 }
 
 // Вызывается при старте потребителя (Реализация интерфейса sarama.ConsumerGroupHandler)
 func (c *Consumer) Setup(_ sarama.ConsumerGroupSession) error {
+	// Загружаем кэш
+	if err := c.loadProcessedMessagesCache(); err != nil {
+		fmt.Errorf("Ошибка загрузки кэша: %v\n", err)
+	}
+
 	close(c.ready) // Закрываем канал, что разблокирует все ожидающие горутины
 	return nil
 }
@@ -196,13 +303,31 @@ func (c *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim saram
 	for msg := range claim.Messages() {
 		// TODO: добавить сохранение сырых данных в базу track_loads_log
 
+		processed, err := c.isMessageProcessed(msg)
+		if err != nil {
+			fmt.Printf("Ошибка проверки обработки сообщения: %v\n", err)
+			continue
+		}
+
+		if processed {
+			fmt.Printf("Сообщение уже обработано: %d/%d\n", msg.Partition, msg.Offset)
+			session.MarkMessage(msg, "")
+			continue
+		}
+		
 		// Отправляем сырые данные в loader
 		if err := c.sendToLoader(msg.Value); err != nil {
 			fmt.Printf("Ошибка отправки в loader: %v\n", err)
 			continue
 		}
 
-		fmt.Printf("Сообщение успешно обработано\n")
+		// Сохраняем информацию об обработке в транзакции
+		if err := c.markMessageProcessed(msg); err != nil {
+			fmt.Printf("Ошибка сохранения состояния: %v\n", err)
+			continue
+		}
+
+		fmt.Printf("Сообщение успешно обработано: %d/%d\n", msg.Partition, msg.Offset)
 		session.MarkMessage(msg, "")
 	}
 	return nil
