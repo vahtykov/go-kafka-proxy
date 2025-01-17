@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"go-rest-api-kafka/internal/config"
 	"go-rest-api-kafka/internal/database"
-	"go-rest-api-kafka/internal/kafka"
+
+	// "go-rest-api-kafka/internal/kafka"
+	kafka_test "go-rest-api-kafka/internal/kafka-test"
 	"go-rest-api-kafka/internal/server"
 	"log"
 )
@@ -23,21 +25,21 @@ func main() {
 	}
 
 	// Создание Kafka консьюмер
-	consumer, err := kafka.NewConsumer(
+	kafka_test.NewConsumerTest(
 		cfg.KafkaBrokers,
 		cfg.KafkaTopic,
 		cfg.KafkaGroupID,
 		db,
 		cfg.ServiceLoaderURL,
 	)
-	if err != nil {
-		log.Fatalf("Failed to create Kafka consumer: %v", err)
-	}
+	// if err != nil {
+	// 	log.Fatalf("Failed to create Kafka consumer: %v", err)
+	// }
 
 	// Запуск консьюмера
-	if err := consumer.Start(); err != nil {
-		log.Fatalf("Failed to start Kafka consumer: %v", err)
-	}
+	// if err := consumer.Start(); err != nil {
+	// 	log.Fatalf("Failed to start Kafka consumer: %v", err)
+	// }
 
 	// Создание и запуск HTTP сервера
 	srv := server.NewServer(db)

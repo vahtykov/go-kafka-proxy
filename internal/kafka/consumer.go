@@ -329,7 +329,11 @@ func (c *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim saram
 
 		fmt.Printf("Сообщение успешно обработано: %d/%d\n", msg.Partition, msg.Offset)
 		session.MarkMessage(msg, "")
+
+		// Явно коммитим офсеты в Kafka
+		session.Commit()
 	}
+
 	return nil
 }
 
