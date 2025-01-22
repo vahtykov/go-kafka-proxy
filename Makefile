@@ -11,7 +11,7 @@ BUILD_TIME=$(shell date -u '+%Y-%m-%d_%H:%M:%S')
 GOFLAGS=-v
 LDFLAGS=-ldflags "-X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME} -w -s"
 
-.PHONY: all build clean test coverage lint docker docker-compose help
+.PHONY: all build clean test coverage lint docker docker-compose help install
 
 # Цель по умолчанию
 all: clean build
@@ -64,8 +64,19 @@ docker-compose-down:
 run:
 	go run ${MAIN_FILE}
 
-# Установка зависимостей
+# Установка необходимых инструментов и зависимостей
+install:
+	@echo "Installing dependencies and tools..."
+	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+	go install github.com/cosmtrek/air@latest
+	go install github.com/swaggo/swag/cmd/swag@latest
+	@echo "Installing project dependencies..."
+	go mod download
+	go mod tidy
+
+# Установка только зависимостей проекта
 deps:
+	@echo "Installing project dependencies..."
 	go mod download
 	go mod tidy
 
@@ -81,4 +92,5 @@ help:
 	@echo "  make docker         - собрать Docker образ"
 	@echo "  make docker-compose - запустить через Docker Compose"
 	@echo "  make run            - запустить локально"
-	@echo "  make deps           - установить зависимости"
+	@echo "  make install        - установить необходимые инструменты и зависимости"
+	@echo "  make deps           - установить только зависимости проекта"
