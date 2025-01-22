@@ -370,7 +370,14 @@ func (c *Consumer) logToDatabase(messageData []byte, msg string, op ...string) e
     }
 
     // Извлекаем необходимые поля
-    messageID, _ := kafkaMessage["id"].(uuid.UUID)
+    var messageID uuid.UUID
+    if id, ok := kafkaMessage["id"].(string); ok {
+        parsedUUID, err := uuid.Parse(id)
+        if err != nil {
+            return fmt.Errorf("ошибка парсинга UUID: %v", err)
+        }
+        messageID = parsedUUID
+    }
     eventType, _ := kafkaMessage["eventType"].(string)
     suitCode, _ := kafkaMessage["suitCode"].(string)
 
