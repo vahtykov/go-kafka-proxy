@@ -3,10 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
-	"go-rest-api-kafka/internal/config"
-	"go-rest-api-kafka/internal/database"
-	"go-rest-api-kafka/internal/kafka"
-	"go-rest-api-kafka/internal/server"
+	"go-kafka-proxy/internal/config"
+	"go-kafka-proxy/internal/database"
+	"go-kafka-proxy/internal/kafka"
+	"go-kafka-proxy/internal/server"
 	"log"
 	"net/http"
 	"os"
@@ -35,6 +35,7 @@ func main() {
 		cfg.KafkaGroupID,
 		db,
 		cfg.ServiceLoaderURL,
+		cfg,
 	)
 	if err != nil {
 		log.Fatalf("Failed to create Kafka consumer: %v", err)

@@ -3,17 +3,23 @@ package kafka
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"go-rest-api-kafka/internal/models"
+	"go-kafka-proxy/internal/config"
+	"go-kafka-proxy/internal/models"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/IBM/sarama"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
@@ -65,6 +71,49 @@ type Setting struct {
 		8. Setup()         ├─ Перебалансировка
 		9. ConsumeClaim() ─┘
 */
+
+func configureSSL(config *sarama.Config, certDir string) error {
+    tlsConfig := &tls.Config{
+        InsecureSkipVerify: false,
+    }
+
+    // Читаем сертификат
+    certPEM, err := os.ReadFile(filepath.Join(certDir, "tls_pem.txt"))
+    if err != nil {
+        return fmt.Errorf("error reading certificate: %v", err)
+    }
+
+    // Читаем ключ
+    keyPEM, err := os.ReadFile(filepath.Join(certDir, "tls.key"))
+    if err != nil {
+        return fmt.Errorf("error reading private key: %v", err)
+    }
+
+    // Читаем корневой сертификат
+    caCertPEM, err := os.ReadFile(filepath.Join(certDir, "tls_root_pem.txt"))
+    if err != nil {
+        return fmt.Errorf("error reading CA certificate: %v", err)
+    }
+
+    // Добавляем корневой сертификат
+    caCertPool := x509.NewCertPool()
+    if !caCertPool.AppendCertsFromPEM(caCertPEM) {
+        return fmt.Errorf("failed to parse CA certificate")
+    }
+    tlsConfig.RootCAs = caCertPool
+
+    // Загружаем сертификат и ключ клиента
+    cert, err := tls.X509KeyPair(certPEM, keyPEM)
+    if err != nil {
+        return fmt.Errorf("error loading certificate and key: %v", err)
+    }
+    tlsConfig.Certificates = []tls.Certificate{cert}
+
+    config.Net.TLS.Enable = true
+    config.Net.TLS.Config = tlsConfig
+
+    return nil
+}
 
 //---Работа с in-memory кэшем---
 func (c *Consumer) loadProcessedMessagesCache() error {
@@ -176,9 +225,15 @@ func GetKafkaConsumerStrategy(db *gorm.DB) (string, error) {
     return setting.Value, nil
 }
 
-func NewConsumer(brokers string, topic string, groupID string, db *gorm.DB, serviceURL string) (*Consumer, error) {
+func NewConsumer(brokers string, topic string, groupID string, db *gorm.DB, serviceURL string, cfg *config.Config) (*Consumer, error) {
 	config := sarama.NewConfig()
 	
+	if cfg.KafkaSSL == "Y" {
+		if err := configureSSL(config, cfg.KafkaCertDir); err != nil {
+			return nil, fmt.Errorf("failed to configure SSL: %v", err)
+		}
+	}
+
 	// Получаем стратегию из базы данных
 	strategy, err := GetKafkaConsumerStrategy(db)
 	if err != nil {
@@ -303,6 +358,50 @@ func (c *Consumer) sendToLoader(ctx context.Context, messageData []byte) error {
 	return nil
 }
 
+func (c *Consumer) logToDatabase(messageData []byte, msg string, op ...string) error {
+    var kafkaMessage map[string]interface{}
+    if err := json.Unmarshal(messageData, &kafkaMessage); err != nil {
+        return fmt.Errorf("ошибка декодирования JSON: %v", err)
+    }
+
+		var operation string
+    if len(op) > 0 {
+        operation = op[0]
+    }
+
+    // Извлекаем необходимые поля
+    messageID, _ := kafkaMessage["id"].(uuid.UUID)
+    eventType, _ := kafkaMessage["eventType"].(string)
+    suitCode, _ := kafkaMessage["suitCode"].(string)
+
+    // Извлекаем payload.code
+    payload, ok := kafkaMessage["payload"].(map[string]interface{})
+    var code string
+    if ok {
+        code, _ = payload["code"].(string)
+    }
+
+    log := models.TrackLoadLog{
+        UUID:      messageID,
+        Operation: func() string {
+            if operation != "" {
+                return operation
+            }
+            return eventType
+        }(),
+        Type:      suitCode,
+        Payload:   messageData,
+        Key:       code,
+        Msg:       msg,
+    }
+
+    if err := c.db.Create(&log).Error; err != nil {
+        return fmt.Errorf("ошибка сохранения лога: %v", err)
+    }
+
+    return nil
+}
+
 // Вызывается для обработки сообщений
 func (c *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
 	fmt.Printf("Starting to consume messages from partition %d\n", claim.Partition())
@@ -320,11 +419,19 @@ func (c *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim saram
 			processed, err := c.isMessageProcessed(msg)
 			if err != nil {
 				fmt.Printf("Ошибка проверки обработки сообщения: %v\n", err)
+				// Логируем ошибку
+        if err := c.logToDatabase(msg.Value, fmt.Sprintf("Ошибка проверки обработки сообщения: %v", err), "ERROR"); err != nil {
+          fmt.Printf("Ошибка логирования: %v\n", err)
+        }
 				continue
 			}
 
 			if processed {
 				fmt.Printf("Сообщение уже обработано: %d/%d\n", msg.Partition, msg.Offset)
+				// Логируем пропуск
+        if err := c.logToDatabase(msg.Value, "Сообщение уже было обработано", "SKIPPED"); err != nil {
+          fmt.Printf("Ошибка логирования: %v\n", err)
+        }
 				session.MarkMessage(msg, "")
 				continue
 			}
@@ -332,15 +439,28 @@ func (c *Consumer) ConsumeClaim(session sarama.ConsumerGroupSession, claim saram
 			// Отправляем сырые данные в loader
 			if err := c.sendToLoader(session.Context(), msg.Value); err != nil {
 				fmt.Printf("Ошибка отправки в loader: %v\n", err)
+				// Логируем ошибку
+        if logErr := c.logToDatabase(msg.Value, fmt.Sprintf("Ошибка отправки в loader: %v", err), "ERROR"); logErr != nil {
+          fmt.Printf("Ошибка логирования: %v\n", logErr)
+        }
 				continue
 			}
 
 			// Сохраняем информацию об обработке в транзакции
 			if err := c.markMessageProcessed(msg); err != nil {
 				fmt.Printf("Ошибка сохранения состояния: %v\n", err)
+				// Логируем ошибку
+        if logErr := c.logToDatabase(msg.Value, fmt.Sprintf("Ошибка сохранения состояния: %v", err), "ERROR"); logErr != nil {
+          fmt.Printf("Ошибка логирования: %v\n", logErr)
+        }
 				continue
 			}
 
+			// Логируем успешную обработку
+      if err := c.logToDatabase(msg.Value, ""); err != nil {
+        fmt.Printf("Ошибка логирования: %v\n", err)
+      }
+			
 			fmt.Printf("Сообщение успешно обработано: %d/%d\n", msg.Partition, msg.Offset)
 			session.MarkMessage(msg, "")
 			session.Commit()

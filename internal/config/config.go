@@ -7,6 +7,8 @@ import (
 )
 
 type Config struct {
+    KafkaSSL   string
+    AppMode    string
     DBHost     string
     DBPort     string
     DBUser     string
@@ -17,6 +19,7 @@ type Config struct {
     Port         string
     ServiceLoaderURL   string
     KafkaGroupID string
+    KafkaCertDir string
 }
 
 func LoadConfig() (*Config, error) {
@@ -24,7 +27,9 @@ func LoadConfig() (*Config, error) {
         return nil, err
     }
 
-    return &Config{
+    cfg := &Config{
+        KafkaSSL:     os.Getenv("KAFKA_SSL"),
+        AppMode:      os.Getenv("APP_MODE"),
         DBHost:       os.Getenv("DB_HOST"),
         DBPort:       os.Getenv("DB_PORT"),
         DBUser:       os.Getenv("DB_USER"),
@@ -35,5 +40,15 @@ func LoadConfig() (*Config, error) {
         Port:         os.Getenv("PORT"),
         ServiceLoaderURL:   os.Getenv("SERVICE_LOADER_URL"),
         KafkaGroupID: os.Getenv("KAFKA_GROUP_ID"),
-    }, nil
+    }
+
+    if cfg.KafkaSSL == "Y" {
+        if cfg.AppMode == "local" {
+            cfg.KafkaCertDir = "conf/secrets/kafka"
+        } else {
+            cfg.KafkaCertDir = "/vault/secrets/kafka"
+        }
+    }
+
+    return cfg, nil
 }

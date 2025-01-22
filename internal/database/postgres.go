@@ -2,7 +2,7 @@ package database
 
 import (
 	"fmt"
-	"go-rest-api-kafka/internal/config"
+	"go-kafka-proxy/internal/config"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"

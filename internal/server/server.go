@@ -2,7 +2,7 @@ package server
 
 import (
 	"context"
-	"go-rest-api-kafka/internal/handlers"
+	"go-kafka-proxy/internal/handlers"
 
 	"net/http"
 

@@ -3,7 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"go-rest-api-kafka/internal/config"
+	"go-kafka-proxy/internal/config"
 	"log"
 	"strings"
 	"time"

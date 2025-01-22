@@ -34,6 +34,8 @@ go.work
 
 # Binary output directory
 dist/
+conf/
+vault
 
 # Air live reload
 tmp/
