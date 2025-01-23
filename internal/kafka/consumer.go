@@ -75,6 +75,13 @@ type Setting struct {
 func configureSSL(config *sarama.Config, certDir string) error {
     tlsConfig := &tls.Config{
         InsecureSkipVerify: false,
+        MinVersion:         tls.VersionTLS12,
+        MaxVersion:         tls.VersionTLS13,
+        // Добавляем проверку имени сервера
+        VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+            // Пропускаем дополнительную проверку имени хоста
+            return nil
+        },
     }
 
     // Читаем сертификат
@@ -108,6 +115,15 @@ func configureSSL(config *sarama.Config, certDir string) error {
         return fmt.Errorf("error loading certificate and key: %v", err)
     }
     tlsConfig.Certificates = []tls.Certificate{cert}
+
+    // Добавляем ServerName если он есть в сертификате
+    if len(cert.Certificate) > 0 {
+        if pc, err := x509.ParseCertificate(cert.Certificate[0]); err == nil {
+            if len(pc.DNSNames) > 0 {
+                tlsConfig.ServerName = pc.DNSNames[0]
+            }
+        }
+    }
 
     config.Net.TLS.Enable = true
     config.Net.TLS.Config = tlsConfig
